@@ -4,6 +4,10 @@ import cv2
 import pytesseract
 from ultralytics import YOLO
 from flask_cors import CORS
+import subprocess
+from google.generativeai import GenerativeModel, configure
+import base64
+import json
 
 app = Flask(__name__, static_folder='public', static_url_path='/public')
 CORS(app)
@@ -15,26 +19,69 @@ def serve_static(filename):
 MODEL_PATH = os.path.join(os.path.dirname(__file__), 'best.pt')
 model = YOLO(MODEL_PATH)
 
+# Configure Gemini API
+GEMINI_API_KEY = "AIzaSyCZYjZHfcXB-BsJcYbq0D4CVbyHAz5ktSc"  # Replace with your actual API key
+configure(api_key=GEMINI_API_KEY)
+gemini_model = GenerativeModel("gemini-2.0-flash") # Using pro-vision for image/video
+
 # Set path for Tesseract OCR (Ensure Tesseract is installed)
 pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 
-def extract_geolocation(frame):
-    """
-    Extract latitude and longitude from the bottom of the frame using OCR.
-    """
-    height, width, _ = frame.shape
-    cropped_frame = frame[height-50:height, 0:width]
+def convert_to_webm(input_path, output_path):
+    """Converts a video file to WebM format using FFmpeg."""
+    try:
+        command = [
+            'ffmpeg',
+            '-i', input_path,
+            '-c:v', 'libvpx-vp9',
+            '-crf', '30',
+            '-b:v', '0',
+            '-c:a', 'libopus',
+            '-b:a', '128k',
+            output_path
+        ]
+        subprocess.run(command, check=True, capture_output=True, text=True)
+        print(f"✅ Successfully converted {input_path} to {output_path}")
+        return True
+    except subprocess.CalledProcessError as e:
+        print(f"❌ Error converting video: {e.stderr}")
+        return False
+    except FileNotFoundError:
+        print("❌ Error: FFmpeg not found. Please ensure FFmpeg is installed and in your system's PATH.")
+        return False
 
-    # Perform OCR to extract text
-    text = pytesseract.image_to_string(cropped_frame)
+def send_video_to_gemini(video_path):
+    """Sends the processed video to Gemini for location extraction."""
+    try:
+        with open(video_path, "rb") as video_file:
+            video_data = base64.b64encode(video_file.read()).decode('utf-8')
 
-    # Extract latitude and longitude using regex
-    import re
-    match = re.search(r'(\d+\.\d+)\s*,\s*(\d+\.\d+)', text)
-    if match:
-        latitude, longitude = match.groups()
-        return float(latitude), float(longitude)
-    return None
+        prompt = ("Analyze the video of a railway track to identify the latitude and longitude of any damaged tracks marked in the video. "
+                    "Return all the location data in a single JSON file containing a list of unique locations in the format: "
+                    "{'locations': [{'latitude': '...', 'longitude': '...'}, ...]}.\n\n"
+                    "If multiple damages are detected at the same coordinates, include only one instance of each location."
+                )
+
+
+        response = gemini_model.generate_content(
+            [prompt, {"mime_type": "video/webm", "data": video_data}]
+        )
+
+        if response.text:
+            print(f"🔍 Raw Gemini Response: {response.text}") # Debugging
+            try:
+                location_data = json.loads(response.text)
+                return location_data
+            except json.JSONDecodeError:
+                print(f"⚠️ Gemini response was not valid JSON: {response.text}")
+                return {"error": "Invalid JSON response from Gemini"}
+        else:
+            print("⚠️ Gemini returned an empty response.")
+            return {"error": "Empty response from Gemini"}
+
+    except Exception as e:
+        print(f"⚠️ Error sending video to Gemini: {e}")
+        return {"error": f"Error sending video to Gemini: {e}"}
 
 @app.route('/process_video', methods=['POST'])
 def process_video():
@@ -43,6 +90,9 @@ def process_video():
 
     video = request.files['video']
     input_path = os.path.join('public', 'Input.mp4')
+    output_path = os.path.join('public', 'Output_raw.mp4') # Save the raw output first
+    final_output_path = os.path.join('public', 'Output.webm') # Final playable output in WebM
+    gemini_response_path = os.path.join('public', 'gemini_response.json')
 
     # Ensure directory exists
     os.makedirs('public', exist_ok=True)
@@ -50,52 +100,54 @@ def process_video():
     print(f"📂 Video saved: {input_path}")
 
     cap = cv2.VideoCapture(input_path)
-
     if not cap.isOpened():
         return jsonify({'error': 'Failed to open video'}), 500
 
+    frame_width = int(cap.get(3))
+    frame_height = int(cap.get(4))
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    out = cv2.VideoWriter(output_path, fourcc, 30.0, (frame_width, frame_height))
+
     frame_count = 0
-    damage_locations = []
-    location_file_path = os.path.join('public', 'damage_locations.txt')
 
-    with open(location_file_path, 'w') as loc_file:
-        while cap.isOpened():
-            ret, frame = cap.read()
-            if not ret:
-                break
+    while cap.isOpened():
+        ret, frame = cap.read()
+        if not ret:
+            break
 
-            frame_count += 1
-            results = model.predict(frame)
-            damage_detected = False
+        frame_count += 1
+        results = model.predict(frame)
 
-            for result in results:
-                for box in result.boxes.xyxy:
-                    x1, y1, x2, y2 = map(int, box)
-                    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 2)
-                    cv2.putText(frame, "Damaged Track", (x1, y1 - 10),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
-                    damage_detected = True
+        for result in results:
+            for box in result.boxes.xyxy:
+                x1, y1, x2, y2 = map(int, box)
+                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 2)
+                cv2.putText(frame, "Damaged Track", (x1, y1 - 10),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
 
-            if damage_detected:
-                location = extract_geolocation(frame)
-                if location:
-                    latitude, longitude = location
-                    damage_locations.append({'latitude': latitude, 'longitude': longitude})
-                    cv2.putText(frame, f"Location: {latitude}, {longitude}", (10, frame.shape[0] - 20),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-                    loc_file.write(f"Frame {frame_count}: Latitude: {latitude}, Longitude: {longitude}\n")
-                    print(f"Frame {frame_count}: Latitude: {latitude}, Longitude: {longitude}")
-
-                # Save the damaged frame as an image
-                damage_image_path = os.path.join('public', f'damage_frame_{frame_count}.jpg')
-                cv2.imwrite(damage_image_path, frame)
+        out.write(frame)
 
     cap.release()
-    print(f"✅ Damaged frames saved in public folder.")
-    print(f"Damaged locations stored in {location_file_path}")
+    out.release()
+    print(f"✅ Raw output video saved to {output_path}")
 
-    return jsonify({'message': 'Processing complete', 'damage_locations': damage_locations})
+    # Convert the raw output to a playable WebM
+    if convert_to_webm(output_path, final_output_path):
+        print(f"✅ Processed video saved to {final_output_path}")
+        # Send the processed video to Gemini for location extraction
+        location_data = send_video_to_gemini(final_output_path)
+
+        # Save Gemini response to a JSON file
+        try:
+            with open(gemini_response_path, 'w') as f:
+                json.dump(location_data, f, indent=4)
+            print(f"📄 Gemini response saved to {gemini_response_path}")
+        except Exception as e:
+            print(f"⚠️ Error saving Gemini response to JSON: {e}")
+
+        return jsonify({'message': 'Processing complete', 'output_video': '/public/Output.webm', 'location_data': location_data, 'gemini_response_file': '/public/gemini_response.json'})
+    else:
+        return jsonify({'error': 'Failed to convert output video to a playable format'}), 500
 
 if __name__ == '__main__':
     app.run(debug=True, port=5000)
-    
