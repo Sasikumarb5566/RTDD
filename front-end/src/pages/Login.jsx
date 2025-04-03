@@ -3,6 +3,7 @@ import eyeOpen from "../assets/eye-open.png";
 import eyeClose from "../assets/eye-close.png";
 import { useNavigate } from 'react-router-dom'
 
+
 const Login = () => {
   const navigate = useNavigate();
   const [formData, setFormData] = useState({
@@ -27,7 +28,7 @@ const Login = () => {
   return (
     <div className="flex justify-center items-center h-screen ">
       <div className="flex flex-col md:w-2/6 rounded-xl shadow-2xl p-3 ">
-        <p className="text-center text-2xl font-bold text-[#035450]">
+        <p className="text-center text-2xl font-bold text-blue-600">
           RTDD Login
         </p>
         <div className="flex flex-col mt-8 gap-4">
@@ -81,7 +82,7 @@ const Login = () => {
           )}
         </div>
         <button
-          className="flex mt-6 text-center bg-[#035450] text-white text-lg h-12 justify-center items-center rounded-md hover:bg-white hover:text-[#035450] hover:border-2 hover:border-[#035450]"
+          className="flex mt-6 text-center bg-blue-600 text-white text-lg h-12 justify-center items-center rounded-md hover:bg-white hover:text-[#035450] hover:border-2 hover:border-blue-600"
           onClick={handleLogin}
         >
           Login

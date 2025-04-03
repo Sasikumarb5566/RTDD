@@ -22,7 +22,8 @@ model = YOLO(MODEL_PATH)
 # Configure Gemini API
 GEMINI_API_KEY = "AIzaSyCZYjZHfcXB-BsJcYbq0D4CVbyHAz5ktSc"  # Replace with your actual API key
 configure(api_key=GEMINI_API_KEY)
-gemini_model = GenerativeModel("gemini-2.0-flash") # Using pro-vision for image/video
+# Use a currently supported model like "gemini-2.0-pro-vision" or "gemini-2.0-flash"
+gemini_model = GenerativeModel("gemini-2.0-flash") # Or "gemini-2.0-flash"
 
 # Set path for Tesseract OCR (Ensure Tesseract is installed)
 pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
@@ -56,12 +57,12 @@ def send_video_to_gemini(video_path):
         with open(video_path, "rb") as video_file:
             video_data = base64.b64encode(video_file.read()).decode('utf-8')
 
-        prompt = ("Analyze the video of a railway track to identify the latitude and longitude of any damaged tracks marked in the video. "
-                    "Return all the location data in a single JSON file containing a list of unique locations in the format: "
-                    "{'locations': [{'latitude': '...', 'longitude': '...'}, ...]}.\n\n"
-                    "If multiple damages are detected at the same coordinates, include only one instance of each location."
-                )
-
+        prompt = (
+            "Analyze the video of a railway track to identify the latitude and longitude of any damaged tracks marked in the video. "
+            "Return all the location data in a single JSON file containing a list of unique locations in the format: "
+            "{'locations': [{'latitude': '...', 'longitude': '...'}, ...]}.\n\n"
+            "If multiple damages are detected at the same coordinates, include only one instance of each location."
+        )
 
         response = gemini_model.generate_content(
             [prompt, {"mime_type": "video/webm", "data": video_data}]
@@ -69,20 +70,24 @@ def send_video_to_gemini(video_path):
 
         if response.text:
             print(f"🔍 Raw Gemini Response: {response.text}") # Debugging
-            try:
-                location_data = json.loads(response.text)
-                return location_data
-            except json.JSONDecodeError:
-                print(f"⚠️ Gemini response was not valid JSON: {response.text}")
-                return {"error": "Invalid JSON response from Gemini"}
+
+            # Remove ```json and any surrounding whitespace
+            cleaned_response = response.text.strip()
+            if cleaned_response.startswith("```json"):
+                cleaned_response = cleaned_response[len("```json"):].strip()
+            if cleaned_response.endswith("```"):
+                cleaned_response = cleaned_response[:-len("```")].strip()
+
+            return cleaned_response  # Return the cleaned JSON string
         else:
             print("⚠️ Gemini returned an empty response.")
-            return {"error": "Empty response from Gemini"}
+            return None
 
     except Exception as e:
         print(f"⚠️ Error sending video to Gemini: {e}")
-        return {"error": f"Error sending video to Gemini: {e}"}
-
+        return None
+    
+    
 @app.route('/process_video', methods=['POST'])
 def process_video():
     if 'video' not in request.files:
@@ -135,19 +140,26 @@ def process_video():
     if convert_to_webm(output_path, final_output_path):
         print(f"✅ Processed video saved to {final_output_path}")
         # Send the processed video to Gemini for location extraction
-        location_data = send_video_to_gemini(final_output_path)
+        gemini_response_text = send_video_to_gemini(final_output_path)
 
-        # Save Gemini response to a JSON file
-        try:
-            with open(gemini_response_path, 'w') as f:
-                json.dump(location_data, f, indent=4)
-            print(f"📄 Gemini response saved to {gemini_response_path}")
-        except Exception as e:
-            print(f"⚠️ Error saving Gemini response to JSON: {e}")
+        if gemini_response_text:
+            gemini_response_path = os.path.join('public', 'gemini_response.json')
+            try:
+                with open(gemini_response_path, 'w') as f:
+                    f.write(gemini_response_text)
+                print(f"📄 Gemini response saved to {gemini_response_path}")
+            except Exception as e:
+                print(f"⚠️ Error saving Gemini response to JSON file: {e}")
 
-        return jsonify({'message': 'Processing complete', 'output_video': '/public/Output.webm', 'location_data': location_data, 'gemini_response_file': '/public/gemini_response.json'})
-    else:
-        return jsonify({'error': 'Failed to convert output video to a playable format'}), 500
+            # Optionally, you can still parse it to send location data to the frontend
+            try:
+                location_data = json.loads(gemini_response_text).get('locations', [])
+            except json.JSONDecodeError:
+                location_data = {"error": "Could not parse Gemini response"}
+
+            return jsonify({'message': 'Processing complete', 'output_video': '/public/Output.webm', 'location_data': location_data, 'gemini_response_file': '/public/gemini_response.json'})
+        else:
+            return jsonify({'error': 'Failed to convert output video to a playable format'}), 500
 
 if __name__ == '__main__':
     app.run(debug=True, port=5000)
